@@ -107,7 +107,9 @@ export function BotsPage() {
         }
       }
     };
-    ws.onerror = () => { ws.close(); };
+    ws.onerror = () => {
+      ws.close();
+    };
     ws.onclose = () => {
       if (settled) return;
       if (retries < MAX_RETRIES) {
@@ -184,11 +186,7 @@ export function BotsPage() {
       ) : (
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
           {bots.map((bot) => (
-            <BotInstanceCard
-              key={bot.id}
-              bot={bot}
-              onRebind={() => setBinding(true)}
-            />
+            <BotInstanceCard key={bot.id} bot={bot} onRebind={() => setBinding(true)} />
           ))}
 
           {bots.length === 0 ? (
@@ -224,13 +222,7 @@ function QrCanvas({ url }: { url: string }) {
   return <canvas ref={ref} className="block rounded-lg" />;
 }
 
-function BotInstanceCard({
-  bot,
-  onRebind,
-}: {
-  bot: any;
-  onRebind: () => void;
-}) {
+function BotInstanceCard({ bot, onRebind }: { bot: any; onRebind: () => void }) {
   const { toast } = useToast();
   const { confirm, ConfirmDialog } = useConfirm();
   const deleteMutation = useDeleteBot();
@@ -249,12 +241,14 @@ function BotInstanceCard({
       if (!ok) return;
       deleteMutation.mutate(bot.id, {
         onSuccess: () => toast({ title: "已删除账号" }),
-        onError: (e) => toast({ variant: "destructive", title: "操作失败", description: e.message }),
+        onError: (e) =>
+          toast({ variant: "destructive", title: "操作失败", description: e.message }),
       });
     } else if (action === "reconnect") {
       reconnectMutation.mutate(bot.id, {
         onSuccess: () => toast({ title: "指令已发出", description: "正在尝试重新建立连接..." }),
-        onError: (e) => toast({ variant: "destructive", title: "操作失败", description: e.message }),
+        onError: (e) =>
+          toast({ variant: "destructive", title: "操作失败", description: e.message }),
       });
     }
   }
@@ -321,7 +315,7 @@ function BotInstanceCard({
           {bot.reminder_hours ? (
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Clock className="h-3.5 w-3.5 text-orange-500" />
-              <span>提前 {24 - bot.reminder_hours}h 提醒</span>
+              <span>到期前 {24 - bot.reminder_hours}h 提醒</span>
             </div>
           ) : null}
         </div>
