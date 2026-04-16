@@ -8,14 +8,24 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/openilink/openilink-hub/internal/store"
 )
+
+// perAttemptTimeout caps each discovery attempt so a slow Streamable HTTP
+// first try cannot starve the SSE fallback of the parent context budget.
+const perAttemptTimeout = 10 * time.Second
+
+// httpStatusRE matches an HTTP status word-bounded in an error message, so
+// status like "401" in a URL fragment or port won't cause a false match.
+var httpStatusRE = regexp.MustCompile(`\b(40[1345])\b`)
 
 const maxImportTools = 200
 
@@ -114,14 +124,19 @@ func classifyImportError(ctx context.Context, err error) (int, string, string) {
 	}
 
 	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
-		return http.StatusGatewayTimeout, "MCP server did not respond within 15s", "timeout"
+		return http.StatusGatewayTimeout, "MCP server did not respond in time", "timeout"
 	}
 	return http.StatusBadGateway, truncate(err.Error(), 200), "unknown"
 }
 
+// truncate trims s to at most n bytes without splitting a multibyte rune and
+// appends an ellipsis. Used on error strings that surface in JSON responses.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "..."
 }
@@ -171,11 +186,16 @@ func discoverMCPTools(ctx context.Context, hubVersion, serverURL string, headers
 	}
 
 	// Try Streamable HTTP first (new spec). If the server signals it is a legacy
-	// SSE server, fall back to the SSE transport.
-	result, err = runDiscovery(ctx, hubVersion, serverURL, headers, httpClient, transportStreamable)
+	// SSE server, fall back to the SSE transport. Each attempt gets its own
+	// bounded context so the retry is not starved of budget.
+	firstCtx, firstCancel := context.WithTimeout(ctx, perAttemptTimeout)
+	result, err = runDiscovery(firstCtx, hubVersion, serverURL, headers, httpClient, transportStreamable)
+	firstCancel()
 	if err != nil && isLegacySSESignal(err) {
 		slog.Info("mcp import: retrying with SSE transport", "url", serverURL)
-		result, err = runDiscovery(ctx, hubVersion, serverURL, headers, httpClient, transportSSE)
+		retryCtx, retryCancel := context.WithTimeout(ctx, perAttemptTimeout)
+		result, err = runDiscovery(retryCtx, hubVersion, serverURL, headers, httpClient, transportSSE)
+		retryCancel()
 	}
 	return result, err
 }
@@ -267,12 +287,21 @@ func runDiscovery(ctx context.Context, hubVersion, serverURL string, headers map
 
 // isLegacySSESignal reports whether the error indicates the server speaks the
 // legacy SSE transport instead of Streamable HTTP, so discovery should retry.
+// Triggers on either mcp-go's explicit "legacy sse" hint, or an HTTP 405/406
+// from the Streamable HTTP initialize POST, which the spec flags as the
+// signal to fall back.
 func isLegacySSESignal(err error) bool {
 	if err == nil {
 		return false
 	}
 	low := strings.ToLower(err.Error())
-	return strings.Contains(low, "legacy sse")
+	if strings.Contains(low, "legacy sse") {
+		return true
+	}
+	if m := httpStatusRE.FindString(low); m == "405" || m == "406" {
+		return true
+	}
+	return false
 }
 
 // wrapTransportError classifies a network/protocol error into an importError
@@ -283,7 +312,7 @@ func wrapTransportError(stage string, err error) error {
 
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(low, "deadline exceeded"):
-		return &importError{Stage: "timeout", Detail: "MCP server did not respond within 15s", Err: err}
+		return &importError{Stage: "timeout", Detail: "MCP server did not respond in time", Err: err}
 	case strings.Contains(low, "private/internal"):
 		return &importError{Stage: "blocked", Detail: "MCP server resolves to a private/internal IP and was blocked", Err: err}
 	case strings.Contains(low, "cannot resolve host"):
@@ -292,18 +321,29 @@ func wrapTransportError(stage string, err error) error {
 		return &importError{Stage: stage, Detail: "connection refused by MCP server", Err: err}
 	case strings.Contains(low, "tls") || strings.Contains(low, "x509"):
 		return &importError{Stage: stage, Detail: "TLS handshake failed", Err: err}
-	case strings.Contains(low, "401") || strings.Contains(low, "unauthorized"):
-		return &importError{Stage: stage, Detail: "MCP server rejected credentials (401)", Err: err}
-	case strings.Contains(low, "403") || strings.Contains(low, "forbidden"):
-		return &importError{Stage: stage, Detail: "MCP server forbade access (403)", Err: err}
-	case strings.Contains(low, "404"):
-		return &importError{Stage: stage, Detail: "MCP endpoint not found (404) — check the URL path", Err: err}
-	case strings.Contains(low, "method not allowed") || strings.Contains(low, "405"):
-		return &importError{Stage: stage, Detail: "MCP server does not accept Streamable HTTP transport", Err: err}
 	case strings.Contains(low, "legacy sse"):
 		return &importError{Stage: stage, Detail: "MCP server uses the legacy SSE transport and the fallback also failed", Err: err}
-	default:
-		return &importError{Stage: stage, Detail: truncate(msg, 200), Err: err}
+	case strings.Contains(low, "method not allowed"):
+		return &importError{Stage: stage, Detail: "MCP server does not accept Streamable HTTP transport", Err: err}
 	}
+
+	switch httpStatusRE.FindString(low) {
+	case "401":
+		return &importError{Stage: stage, Detail: "MCP server rejected credentials (401)", Err: err}
+	case "403":
+		return &importError{Stage: stage, Detail: "MCP server forbade access (403)", Err: err}
+	case "404":
+		return &importError{Stage: stage, Detail: "MCP endpoint not found (404) — check the URL path", Err: err}
+	case "405":
+		return &importError{Stage: stage, Detail: "MCP server does not accept Streamable HTTP transport", Err: err}
+	}
+
+	if strings.Contains(low, "unauthorized") {
+		return &importError{Stage: stage, Detail: "MCP server rejected credentials (401)", Err: err}
+	}
+	if strings.Contains(low, "forbidden") {
+		return &importError{Stage: stage, Detail: "MCP server forbade access (403)", Err: err}
+	}
+	return &importError{Stage: stage, Detail: truncate(msg, 200), Err: err}
 }
 
