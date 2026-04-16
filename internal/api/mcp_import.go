@@ -170,14 +170,41 @@ func discoverMCPTools(ctx context.Context, hubVersion, serverURL string, headers
 		Timeout: 15 * time.Second,
 	}
 
-	opts := []transport.StreamableHTTPCOption{
-		transport.WithHTTPBasicClient(httpClient),
+	// Try Streamable HTTP first (new spec). If the server signals it is a legacy
+	// SSE server, fall back to the SSE transport.
+	result, err = runDiscovery(ctx, hubVersion, serverURL, headers, httpClient, transportStreamable)
+	if err != nil && isLegacySSESignal(err) {
+		slog.Info("mcp import: retrying with SSE transport", "url", serverURL)
+		result, err = runDiscovery(ctx, hubVersion, serverURL, headers, httpClient, transportSSE)
 	}
-	if len(headers) > 0 {
-		opts = append(opts, transport.WithHTTPHeaders(headers))
-	}
+	return result, err
+}
 
-	c, cerr := client.NewStreamableHttpClient(serverURL, opts...)
+type transportKind int
+
+const (
+	transportStreamable transportKind = iota
+	transportSSE
+)
+
+func runDiscovery(ctx context.Context, hubVersion, serverURL string, headers map[string]string, httpClient *http.Client, kind transportKind) (*mcpImportResult, error) {
+	var c *client.Client
+	var cerr error
+
+	switch kind {
+	case transportSSE:
+		opts := []transport.ClientOption{transport.WithHTTPClient(httpClient)}
+		if len(headers) > 0 {
+			opts = append(opts, transport.WithHeaders(headers))
+		}
+		c, cerr = client.NewSSEMCPClient(serverURL, opts...)
+	default:
+		opts := []transport.StreamableHTTPCOption{transport.WithHTTPBasicClient(httpClient)}
+		if len(headers) > 0 {
+			opts = append(opts, transport.WithHTTPHeaders(headers))
+		}
+		c, cerr = client.NewStreamableHttpClient(serverURL, opts...)
+	}
 	if cerr != nil {
 		return nil, &importError{Stage: "connect", Detail: "invalid MCP client configuration", Err: cerr}
 	}
@@ -205,9 +232,7 @@ func discoverMCPTools(ctx context.Context, hubVersion, serverURL string, headers
 		return nil, wrapTransportError("initialize", ierr)
 	}
 
-	result = &mcpImportResult{
-		Tools: []store.AppTool{},
-	}
+	result := &mcpImportResult{Tools: []store.AppTool{}}
 	if initResult != nil {
 		result.ServerName = initResult.ServerInfo.Name
 		result.ServerVersion = initResult.ServerInfo.Version
@@ -240,6 +265,16 @@ func discoverMCPTools(ctx context.Context, hubVersion, serverURL string, headers
 	return result, nil
 }
 
+// isLegacySSESignal reports whether the error indicates the server speaks the
+// legacy SSE transport instead of Streamable HTTP, so discovery should retry.
+func isLegacySSESignal(err error) bool {
+	if err == nil {
+		return false
+	}
+	low := strings.ToLower(err.Error())
+	return strings.Contains(low, "legacy sse")
+}
+
 // wrapTransportError classifies a network/protocol error into an importError
 // with a concise, user-safe message.
 func wrapTransportError(stage string, err error) error {
@@ -265,6 +300,8 @@ func wrapTransportError(stage string, err error) error {
 		return &importError{Stage: stage, Detail: "MCP endpoint not found (404) — check the URL path", Err: err}
 	case strings.Contains(low, "method not allowed") || strings.Contains(low, "405"):
 		return &importError{Stage: stage, Detail: "MCP server does not accept Streamable HTTP transport", Err: err}
+	case strings.Contains(low, "legacy sse"):
+		return &importError{Stage: stage, Detail: "MCP server uses the legacy SSE transport and the fallback also failed", Err: err}
 	default:
 		return &importError{Stage: stage, Detail: truncate(msg, 200), Err: err}
 	}
