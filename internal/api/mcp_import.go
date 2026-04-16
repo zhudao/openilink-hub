@@ -23,9 +23,25 @@ import (
 // first try cannot starve the SSE fallback of the parent context budget.
 const perAttemptTimeout = 10 * time.Second
 
-// httpStatusRE matches an HTTP status word-bounded in an error message, so
-// status like "401" in a URL fragment or port won't cause a false match.
-var httpStatusRE = regexp.MustCompile(`\b(40[1345])\b`)
+// minFallbackBudget is the minimum parent-context time remaining required to
+// retry discovery over SSE after a Streamable HTTP timeout.
+const minFallbackBudget = 3 * time.Second
+
+// httpStatusRE matches a 4xx status we care about inside an error message.
+// The leading `[^\d/:a-zA-Z]` (or start-of-string) rejects digits that are
+// really part of a URL path segment (e.g. "/mcp/405") or TCP port
+// (e.g. ":405"), which would otherwise false-match with plain `\b`.
+var httpStatusRE = regexp.MustCompile(`(?:^|[^\d/:a-zA-Z])(40[13456])\b`)
+
+// findHTTPStatus extracts a matched 4xx status code from err's message, or
+// empty string if none is present.
+func findHTTPStatus(msg string) string {
+	m := httpStatusRE.FindStringSubmatch(msg)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
 
 const maxImportTools = 200
 
@@ -138,6 +154,9 @@ func truncate(s string, n int) string {
 	for n > 0 && !utf8.RuneStart(s[n]) {
 		n--
 	}
+	if n == 0 {
+		return "..."
+	}
 	return s[:n] + "..."
 }
 
@@ -186,18 +205,38 @@ func discoverMCPTools(ctx context.Context, hubVersion, serverURL string, headers
 	}
 
 	// Try Streamable HTTP first (new spec). If the server signals it is a legacy
-	// SSE server, fall back to the SSE transport. Each attempt gets its own
-	// bounded context so the retry is not starved of budget.
+	// SSE server — or the first attempt merely timed out while the parent ctx
+	// still has usable budget — fall back to the SSE transport. Each attempt
+	// gets its own bounded context so the retry is not starved of budget.
 	firstCtx, firstCancel := context.WithTimeout(ctx, perAttemptTimeout)
 	result, err = runDiscovery(firstCtx, hubVersion, serverURL, headers, httpClient, transportStreamable)
 	firstCancel()
-	if err != nil && isLegacySSESignal(err) {
+	if err != nil && shouldFallbackToSSE(ctx, err) {
 		slog.Info("mcp import: retrying with SSE transport", "url", serverURL)
 		retryCtx, retryCancel := context.WithTimeout(ctx, perAttemptTimeout)
 		result, err = runDiscovery(retryCtx, hubVersion, serverURL, headers, httpClient, transportSSE)
 		retryCancel()
 	}
 	return result, err
+}
+
+// shouldFallbackToSSE decides whether a failed Streamable HTTP attempt should
+// be retried over SSE. Retries on explicit legacy signals or on a first-attempt
+// timeout when the parent context still has at least minFallbackBudget left —
+// a single slow response should not foreclose the fallback for a server that
+// happens to be slow but legacy.
+func shouldFallbackToSSE(parent context.Context, err error) bool {
+	if isLegacySSESignal(err) {
+		return true
+	}
+	var ie *importError
+	if errors.As(err, &ie) && ie.Stage == "timeout" {
+		if dl, ok := parent.Deadline(); ok {
+			return time.Until(dl) >= minFallbackBudget
+		}
+		return true
+	}
+	return false
 }
 
 type transportKind int
@@ -298,7 +337,7 @@ func isLegacySSESignal(err error) bool {
 	if strings.Contains(low, "legacy sse") {
 		return true
 	}
-	if m := httpStatusRE.FindString(low); m == "405" || m == "406" {
+	if m := findHTTPStatus(low); m == "405" || m == "406" {
 		return true
 	}
 	return false
@@ -327,14 +366,14 @@ func wrapTransportError(stage string, err error) error {
 		return &importError{Stage: stage, Detail: "MCP server does not accept Streamable HTTP transport", Err: err}
 	}
 
-	switch httpStatusRE.FindString(low) {
+	switch findHTTPStatus(low) {
 	case "401":
 		return &importError{Stage: stage, Detail: "MCP server rejected credentials (401)", Err: err}
 	case "403":
 		return &importError{Stage: stage, Detail: "MCP server forbade access (403)", Err: err}
 	case "404":
 		return &importError{Stage: stage, Detail: "MCP endpoint not found (404) — check the URL path", Err: err}
-	case "405":
+	case "405", "406":
 		return &importError{Stage: stage, Detail: "MCP server does not accept Streamable HTTP transport", Err: err}
 	}
 
