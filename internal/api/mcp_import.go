@@ -19,8 +19,9 @@ import (
 	"github.com/openilink/openilink-hub/internal/store"
 )
 
-// perAttemptTimeout caps each discovery attempt so a slow Streamable HTTP
-// first try cannot starve the SSE fallback of the parent context budget.
+// perAttemptTimeout caps the SSE fallback attempt so a stuck retry cannot
+// exceed the handler's parent-context deadline. The initial Streamable HTTP
+// attempt is not capped and uses the full parent budget.
 const perAttemptTimeout = 10 * time.Second
 
 // minFallbackBudget is the minimum parent-context time remaining required to
@@ -204,13 +205,12 @@ func discoverMCPTools(ctx context.Context, hubVersion, serverURL string, headers
 		Timeout: 15 * time.Second,
 	}
 
-	// Try Streamable HTTP first (new spec). If the server signals it is a legacy
-	// SSE server — or the first attempt merely timed out while the parent ctx
-	// still has usable budget — fall back to the SSE transport. Each attempt
-	// gets its own bounded context so the retry is not starved of budget.
-	firstCtx, firstCancel := context.WithTimeout(ctx, perAttemptTimeout)
-	result, err = runDiscovery(firstCtx, hubVersion, serverURL, headers, httpClient, transportStreamable)
-	firstCancel()
+	// Try Streamable HTTP first (new spec) with the full parent-context budget
+	// so slow-but-healthy Streamable servers are not regressed. If the server
+	// signals it is a legacy SSE server — or the first attempt timed out while
+	// the parent context still has usable budget — fall back to SSE with a
+	// bounded retry so a stuck retry cannot exceed the handler deadline.
+	result, err = runDiscovery(ctx, hubVersion, serverURL, headers, httpClient, transportStreamable)
 	if err != nil && shouldFallbackToSSE(ctx, err) {
 		slog.Info("mcp import: retrying with SSE transport", "url", serverURL)
 		retryCtx, retryCancel := context.WithTimeout(ctx, perAttemptTimeout)
