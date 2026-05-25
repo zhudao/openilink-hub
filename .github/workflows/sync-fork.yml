@@ -1,11 +1,10 @@
-name: Sync Fork
+name: Sync Fork (自动获取上游)
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # 每天 UTC 0点执行
-  workflow_dispatch:       # 支持手动触发
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
-# 为 GITHUB_TOKEN 授予写权限
 permissions:
   contents: write
 
@@ -13,10 +12,22 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync fork with upstream
+      - name: Get upstream repository
+        id: get-upstream
+        run: |
+          UPSTREAM=$(gh api repos/${{ github.repository }} --jq '.parent.full_name')
+          if [ "$UPSTREAM" == "null" ]; then
+            echo "这不是一个 fork 仓库，请手动指定上游"
+            exit 1
+          fi
+          echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync with upstream
         run: |
           gh repo sync ${{ github.repository }} \
-            --source zhudao/openilink-hub \
+            --source ${{ steps.get-upstream.outputs.upstream }} \
             -b main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
