@@ -1,0 +1,18 @@
+name: Sync Fork
+
+on:
+  schedule:
+    # 定时任务：每天凌晨 0点 (UTC时间) 执行一次
+    # 如果想每小时同步，可以改为 '0 * * * *'
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 允许你在 GitHub 页面上手动点击按钮触发同步
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync upstream changes
+        # 使用 GitHub 官方提供的 CLI 工具进行同步，稳定且不需要配置额外的 Token
+        run: gh repo sync ${{ github.repository }} -b main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
