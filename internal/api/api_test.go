@@ -1474,6 +1474,9 @@ func TestBotAPI_UpdateTools(t *testing.T) {
 		if body["tool_count"] != float64(2) {
 			t.Errorf("tool_count = %v, want 2", body["tool_count"])
 		}
+		if body["scope"] != "app" {
+			t.Errorf("scope = %v, want app", body["scope"])
+		}
 
 		// Verify tools were actually updated
 		updated, err := env.store.GetApp(app.ID)
@@ -1502,7 +1505,7 @@ func TestBotAPI_UpdateTools(t *testing.T) {
 		}
 	})
 
-	t.Run("update tools fails for marketplace app", func(t *testing.T) {
+	t.Run("update tools on marketplace app falls back to installation tools", func(t *testing.T) {
 		// Create marketplace app (has registry set)
 		mktScopes, _ := json.Marshal([]string{"tools:write"})
 		mktApp, err := env.store.CreateApp(&store.App{
@@ -1522,12 +1525,45 @@ func TestBotAPI_UpdateTools(t *testing.T) {
 			withBearer(mktInst.AppToken))
 		defer resp.Body.Close()
 
-		if resp.StatusCode != 403 {
-			t.Fatalf("expected 403, got %d", resp.StatusCode)
+		if resp.StatusCode != 200 {
+			body := decodeJSON(t, resp)
+			t.Fatalf("expected 200, got %d: %v", resp.StatusCode, body)
+		}
+		body := decodeJSON(t, resp)
+		if body["scope"] != "installation" {
+			t.Errorf("scope = %v, want installation", body["scope"])
+		}
+
+		// AppDef must remain untouched — parse the tools and assert it's still empty
+		updatedApp, err := env.store.GetApp(mktApp.ID)
+		if err != nil {
+			t.Fatalf("GetApp: %v", err)
+		}
+		var appTools []map[string]any
+		if len(updatedApp.Tools) > 0 {
+			if err := json.Unmarshal(updatedApp.Tools, &appTools); err != nil {
+				t.Fatalf("unmarshal app tools: %v", err)
+			}
+		}
+		if len(appTools) != 0 {
+			t.Errorf("marketplace app tools should not be modified, got %s", string(updatedApp.Tools))
+		}
+
+		// Installation tools should be set
+		updatedInst, err := env.store.GetInstallation(mktInst.ID)
+		if err != nil {
+			t.Fatalf("GetInstallation: %v", err)
+		}
+		var instTools []map[string]any
+		if err := json.Unmarshal(updatedInst.Tools, &instTools); err != nil {
+			t.Fatalf("unmarshal installation tools: %v", err)
+		}
+		if len(instTools) != 1 || instTools[0]["name"] != "test" {
+			t.Errorf("installation tools = %v, want [{name:test}]", instTools)
 		}
 	})
 
-	t.Run("update tools fails for builtin app", func(t *testing.T) {
+	t.Run("update tools on builtin app falls back to installation tools", func(t *testing.T) {
 		// Create builtin app
 		biScopes, _ := json.Marshal([]string{"tools:write"})
 		biApp, err := env.store.CreateApp(&store.App{
@@ -1547,8 +1583,13 @@ func TestBotAPI_UpdateTools(t *testing.T) {
 			withBearer(biInst.AppToken))
 		defer resp.Body.Close()
 
-		if resp.StatusCode != 403 {
-			t.Fatalf("expected 403, got %d", resp.StatusCode)
+		if resp.StatusCode != 200 {
+			body := decodeJSON(t, resp)
+			t.Fatalf("expected 200, got %d: %v", resp.StatusCode, body)
+		}
+		body := decodeJSON(t, resp)
+		if body["scope"] != "installation" {
+			t.Errorf("scope = %v, want installation", body["scope"])
 		}
 	})
 
