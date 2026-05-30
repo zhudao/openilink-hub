@@ -357,9 +357,9 @@ export function BotDetailPage() {
 
           <Separator orientation="vertical" className="h-6 mx-1" />
 
-          {/* Auto-renewal */}
+          {/* Expiry reminder */}
           <div className="flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">自动续期</span>
+            <span className="text-xs text-muted-foreground">到期提醒</span>
             <Select
               value={String(bot.reminder_hours || 0)}
               onValueChange={(v) => handleAutoRenewalChange(Number(v))}
@@ -368,9 +368,9 @@ export function BotDetailPage() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="0">不提醒</SelectItem>
-                <SelectItem value="23">提前 1 小时</SelectItem>
-                <SelectItem value="22">提前 2 小时</SelectItem>
+                <SelectItem value="0">关闭提醒</SelectItem>
+                <SelectItem value="23">到期前 1 小时提醒</SelectItem>
+                <SelectItem value="22">到期前 2 小时提醒</SelectItem>
               </SelectContent>
             </Select>
             {bot.reminder_hours > 0 && (
@@ -383,6 +383,7 @@ export function BotDetailPage() {
                   </span>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="text-xs space-y-1">
+                  <p>微信 24 小时窗口目前不能静默自动续期，Hub 只会在到期前提醒你回一条消息。</p>
                   <p>
                     上次消息:{" "}
                     {bot.last_msg_at ? new Date(bot.last_msg_at * 1000).toLocaleString() : "无"}
@@ -404,6 +405,7 @@ export function BotDetailPage() {
                         ).toLocaleString()
                       : "等待首条消息"}
                   </p>
+                  <p>收到提醒后，在微信里回复任意消息即可刷新窗口。</p>
                 </TooltipContent>
               </Tooltip>
             )}

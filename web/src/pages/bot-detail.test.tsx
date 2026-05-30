@@ -43,7 +43,11 @@ vi.mock("@/hooks/use-bots", () => ({
   useDeleteBot: () => ({
     mutate: (
       id: string,
-      options?: { onSuccess?: () => void; onError?: (error: Error) => void; onSettled?: () => void },
+      options?: {
+        onSuccess?: () => void;
+        onError?: (error: Error) => void;
+        onSettled?: () => void;
+      },
     ) => {
       Promise.resolve(deleteBotMock(id))
         .then(() => options?.onSuccess?.())
@@ -112,7 +116,9 @@ describe("BotDetailPage", () => {
   }
 
   function getDeleteButton() {
-    const deleteButton = container.querySelector('button[aria-label="删除账号"]') as HTMLButtonElement | null;
+    const deleteButton = container.querySelector(
+      'button[aria-label="删除账号"]',
+    ) as HTMLButtonElement | null;
     expect(deleteButton).not.toBeNull();
     return deleteButton!;
   }
@@ -124,6 +130,13 @@ describe("BotDetailPage", () => {
       deleteButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
   }
+
+  it("shows the expiry reminder controls instead of misleading auto-renew wording", async () => {
+    await renderPage();
+
+    expect(container.textContent).toContain("到期提醒");
+    expect(container.textContent).not.toContain("自动续期");
+  });
 
   it("deletes the current bot after confirmation", async () => {
     await renderPage();
